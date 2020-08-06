@@ -12,14 +12,19 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 )
+
+type Keys struct {
+	AuthKey	string `bson:authkey`
+	RefKey string `bson:refkey`
+}
 
 type User struct {
 	Id 		primitive.ObjectID 	`bson:"_id"`
 	Login 	string			`bson:login`
-	AuthKey string 			`bson:authKey`
-	RefKeys []string 		`bson:refKeys`
+	Keys 	[]Keys			`bson:keys`
 }
 
 func stringInSlice(a string, list []string) bool {
@@ -31,8 +36,8 @@ func stringInSlice(a string, list []string) bool {
 	return false
 }
 
-func generateKeys(user string) (string, []string){
-	token:= jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{ "Login": user, "Key":  time.Now().Unix()})
+func generateKeys(user string, userKey int64) (string, []string){
+	token:= jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{ "Login": user, "Key": strconv.FormatInt(userKey, 10) })
 	tokenString, _:= token.SignedString([]byte(os.Getenv("KEY")))
 	key, _ := bcrypt.GenerateFromPassword([]byte(tokenString), 4)
 
@@ -52,7 +57,7 @@ func setCookies(user, ac, rc string, writer http.ResponseWriter){
 }
 
 func getConnection() *mongo.Collection{
-	client, _ := mongo.NewClient(options.Client().ApplyURI("mongodb+srv://user31:1337228@cluster0.tw4ir.mongodb.net/users?retryWrites=true&w=majority\n"))
+	client, _ := mongo.NewClient(options.Client().ApplyURI("mongodb+srv://user31:1337228@cluster0.tw4ir.mongodb.net/users?retryWrites=true&w=majority"))
 	client.Connect(context.TODO())
 	collection:= client.Database("users").Collection("keys")
 
@@ -66,16 +71,38 @@ func decodeRefToken(str string) string {
 	return refKeyDecodeString
 }
 
+func decodeAuthToken(str string) jwt.MapClaims {
+	token, err := jwt.Parse(str, func(token *jwt.Token) (interface{}, error) {
+		return []byte(os.Getenv("KEY")), nil
+	})
+
+	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+		return claims
+	} else {
+		fmt.Println(err)
+	}
+	return nil
+}
+
 func main() {
 	http.HandleFunc("/getTokens", func(writer http.ResponseWriter, request *http.Request) {
 		user:= request.URL.Query().Get("login")
 
-		tokenString, refKey := generateKeys(user)
+		authKey:=time.Now().Unix()
+		tokenString, refKey := generateKeys(user, authKey)
 		collection:=getConnection()
-		p1 := &User{Id: primitive.NewObjectID(), Login: user, AuthKey: tokenString, RefKeys: refKey}
-		collection.InsertOne(context.TODO(), p1)
-		setCookies(user, tokenString, refKey[0], writer)
 
+		var userStruct User
+		collection.FindOne(context.TODO(), bson.M{"login" : user}).Decode(&userStruct)
+
+		if userStruct.Login == user{
+			collection.UpdateOne(context.TODO(), bson.M{ "login": user }, bson.M{"$push": bson.M{"keys": bson.M{"authkey" : strconv.FormatInt(authKey, 10), "refkey": refKey[0]}}})
+		}else {
+			p1 := &User{Id: primitive.NewObjectID(), Login: user, Keys: []Keys{Keys{strconv.FormatInt(authKey, 10), refKey[0]}}}
+			collection.InsertOne(context.TODO(), p1)
+		}
+
+		setCookies(user, tokenString, refKey[0], writer)
 		fmt.Fprintf(writer, refKey[0])
 
 	})
@@ -86,40 +113,43 @@ func main() {
 
 		collection:=getConnection()
 
-		filter := bson.M{ "login": login.Value }
+		authData:=decodeAuthToken(authToken.Value)
 
 		var user User
-		collection.FindOne(context.TODO(), filter).Decode(&user)
-		refKeyDecodeString:=decodeRefToken(refToken.Value)
+		collection.FindOne(context.TODO(), bson.M{ "login": login.Value, "keys" : bson.M{"$elemMatch" : bson.M {"authkey" : authData["Key"], "refkey" : decodeRefToken(refToken.Value)}}}).Decode(&user)
 
-		if user.AuthKey == authToken.Value && stringInSlice(refKeyDecodeString, user.RefKeys) {
-			at, rt := generateKeys(login.Value)
-			collection.UpdateOne(context.TODO(), bson.M{ "login": login.Value }, bson.M{"$set": bson.M{"authkey": at, "refkeys": rt}})
+		if user.Login == login.Value{
+			authKey:=time.Now().Unix()
+			at, rt := generateKeys(login.Value, authKey)
+			collection.UpdateOne(context.TODO(), bson.M{ "login": login.Value }, bson.M{"$pull": bson.M{"keys": bson.M{"authkey" : authData["Key"], "refkey" : decodeRefToken(refToken.Value)}}})
+			collection.UpdateOne(context.TODO(), bson.M{ "login": login.Value }, bson.M{"$push": bson.M{"keys" : bson.M{"authkey": strconv.FormatInt(authKey,10), "refkey": rt[0]}}})
 			setCookies(login.Value, at, rt[0], writer)
 			fmt.Fprintf(writer, "Ключи изменены!" + "\n")
-			/*
-			fmt.Fprintf(writer, user.AuthKey + "\n")
-			fmt.Fprintf(writer, authToken.Value + "\n")
-			fmt.Fprintf(writer, user.RefKeys[0] + "\n")
-			fmt.Fprintf(writer, refToken.Value + "\n")
-			*/
-
-		} else {
-			fmt.Fprintf(writer, "Такого пользователя нет!")
 		}
 	})
 	http.HandleFunc("/delToken", func(writer http.ResponseWriter, request *http.Request) {
 		token:= request.URL.Query().Get("rc")
-		tokenString:=decodeRefToken(token)
+		decodeFlag:= request.URL.Query().Get("decode")
+
+		var tokenString string
+
+		if decodeFlag == "true" {
+			tokenString=decodeRefToken(token)
+		}else {
+			tokenString = token
+		}
+
 		collection:=getConnection()
 
-		collection.UpdateOne(context.TODO(), bson.M{"refkeys" : bson.M{"$eq": tokenString}}, bson.M{"$pull" : bson.M{"refkeys" :  tokenString }})
+		_,err:=collection.UpdateOne(context.TODO(), bson.M{"keys" : bson.M{"$elemMatch" : bson.M{"refkey" : tokenString}}}, bson.M{"$unset" :  bson.M{"keys.$.refkey" : "" }})
+		fmt.Fprint(writer, err)
 	})
 	http.HandleFunc("/delAllTokens", func(writer http.ResponseWriter, request *http.Request) {
 		login:= request.URL.Query().Get("login")
 		collection:=getConnection()
 
-		collection.UpdateOne(context.TODO(), bson.M{"login" : login}, bson.M{"$unset" : bson.M{"refkeys" :  "" }})
+		_,err:=collection.UpdateMany(context.TODO(), bson.M{"login" : login}, bson.M{"$unset" :  bson.M{"keys.$[].refkey" : "" }})
+		fmt.Fprint(writer, err)
 	})
 	http.ListenAndServe(":80", nil)
 }
