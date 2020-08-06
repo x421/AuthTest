@@ -54,12 +54,13 @@ func setCookies(ac, rc string, writer http.ResponseWriter){
 	http.SetCookie(writer, &refCookie)
 }
 
-func getConnection() *mongo.Collection{
+func getConnection() (*mongo.Collection, *mongo.Session){
 	client, _ := mongo.NewClient(options.Client().ApplyURI("mongodb+srv://user31:1337228@cluster0.tw4ir.mongodb.net/users?retryWrites=true&w=majority"))
 	client.Connect(context.TODO())
 	collection:= client.Database("users").Collection("keys")
+	session, _:= client.StartSession()
 
-	return collection
+	return collection, &session
 }
 
 func decodeRefToken(str string) string {
@@ -88,17 +89,23 @@ func main() {
 
 		authKey:=time.Now().Unix()
 		tokenString, refKey := generateKeys(user, authKey)
-		collection:=getConnection()
+		collection, session:=getConnection()
 
 		var userStruct User
 		collection.FindOne(context.TODO(), bson.M{"login" : user}).Decode(&userStruct)
 
-		if userStruct.Login == user{
-			collection.UpdateOne(context.TODO(), bson.M{ "login": user }, bson.M{"$push": bson.M{"keys": bson.M{"authkey" : strconv.FormatInt(authKey, 10), "refkey": refKey[0]}}})
-		}else {
-			p1 := &User{Id: primitive.NewObjectID(), Login: user, Keys: []Keys{Keys{strconv.FormatInt(authKey, 10), refKey[0]}}}
-			collection.InsertOne(context.TODO(), p1)
-		}
+		mongo.WithSession(context.TODO(), *session, func(sc mongo.SessionContext) error {
+			if userStruct.Login == user{
+				collection.UpdateOne(context.TODO(), bson.M{ "login": user }, bson.M{"$push": bson.M{"keys": bson.M{"authkey" : strconv.FormatInt(authKey, 10), "refkey": refKey[0]}}})
+			}else {
+				p1 := &User{Id: primitive.NewObjectID(), Login: user, Keys: []Keys{Keys{strconv.FormatInt(authKey, 10), refKey[0]}}}
+				collection.InsertOne(context.TODO(), p1)
+			}
+
+			return nil
+		})
+		(*session).EndSession(context.TODO())
+
 
 		setCookies(tokenString, refKey[0], writer)
 		fmt.Fprintf(writer, refKey[0])
@@ -108,7 +115,7 @@ func main() {
 		authToken, _ := request.Cookie("ac")
 		refToken, _ := request.Cookie("rc")
 
-		collection:=getConnection()
+		collection, session:=getConnection()
 
 		authData:=decodeAuthToken(authToken.Value)
 		login:=authData["Login"].(string)
@@ -118,11 +125,17 @@ func main() {
 		if user.Login == login{
 			authKey:=time.Now().Unix()
 			at, rt := generateKeys(login, authKey)
-			collection.UpdateOne(context.TODO(), bson.M{ "login": login }, bson.M{"$pull": bson.M{"keys": bson.M{"authkey" : authData["Key"], "refkey" : decodeRefToken(refToken.Value)}}})
-			collection.UpdateOne(context.TODO(), bson.M{ "login": login }, bson.M{"$push": bson.M{"keys" : bson.M{"authkey": strconv.FormatInt(authKey,10), "refkey": rt[0]}}})
+			mongo.WithSession(context.TODO(), *session, func(sc mongo.SessionContext) error {
+				collection.UpdateOne(context.TODO(), bson.M{ "login": login }, bson.M{"$pull": bson.M{"keys": bson.M{"authkey" : authData["Key"], "refkey" : decodeRefToken(refToken.Value)}}})
+				collection.UpdateOne(context.TODO(), bson.M{ "login": login }, bson.M{"$push": bson.M{"keys" : bson.M{"authkey": strconv.FormatInt(authKey,10), "refkey": rt[0]}}})
+				return nil
+			})
+			(*session).EndSession(context.TODO())
 			setCookies(at, rt[0], writer)
 			fmt.Fprintf(writer, "Ключи изменены!" + "\n")
 		}
+
+
 	})
 	http.HandleFunc("/delToken", func(writer http.ResponseWriter, request *http.Request) {
 		token:= request.URL.Query().Get("rc")
@@ -136,17 +149,23 @@ func main() {
 			tokenString = token
 		}
 
-		collection:=getConnection()
+		collection, session:=getConnection()
 
-		_,err:=collection.UpdateOne(context.TODO(), bson.M{"keys" : bson.M{"$elemMatch" : bson.M{"refkey" : tokenString}}}, bson.M{"$unset" :  bson.M{"keys.$.refkey" : "" }})
-		fmt.Fprint(writer, err)
+		mongo.WithSession(context.TODO(), *session, func(sc mongo.SessionContext) error {
+			collection.UpdateOne(context.TODO(), bson.M{"keys" : bson.M{"$elemMatch" : bson.M{"refkey" : tokenString}}}, bson.M{"$unset" :  bson.M{"keys.$.refkey" : "" }})
+			return nil
+		})
+		(*session).EndSession(context.TODO())
 	})
 	http.HandleFunc("/delAllTokens", func(writer http.ResponseWriter, request *http.Request) {
 		login:= request.URL.Query().Get("login")
-		collection:=getConnection()
+		collection, session:=getConnection()
 
-		_,err:=collection.UpdateMany(context.TODO(), bson.M{"login" : login}, bson.M{"$unset" :  bson.M{"keys.$[].refkey" : "" }})
-		fmt.Fprint(writer, err)
+		mongo.WithSession(context.TODO(), *session, func(sc mongo.SessionContext) error {
+			collection.UpdateMany(context.TODO(), bson.M{"login" : login}, bson.M{"$unset" :  bson.M{"keys.$[].refkey" : "" }})
+			return nil
+		})
+		(*session).EndSession(context.TODO())
 	})
 	http.ListenAndServe(":80", nil)
 }
