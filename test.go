@@ -46,12 +46,10 @@ func generateKeys(user string, userKey int64) (string, []string){
 	return tokenString, strings
 }
 
-func setCookies(user, ac, rc string, writer http.ResponseWriter){
-	nameCookie := http.Cookie{Name: "username", Value: user, Secure: false}
+func setCookies(ac, rc string, writer http.ResponseWriter){
 	authCookie := http.Cookie{Name: "ac", Value: ac, Secure: false}
 	refCookie := http.Cookie{Name: "rc", Value: base64.StdEncoding.EncodeToString([]byte(rc)), Secure: false}
 
-	http.SetCookie(writer, &nameCookie)
 	http.SetCookie(writer, &authCookie)
 	http.SetCookie(writer, &refCookie)
 }
@@ -102,28 +100,27 @@ func main() {
 			collection.InsertOne(context.TODO(), p1)
 		}
 
-		setCookies(user, tokenString, refKey[0], writer)
+		setCookies(tokenString, refKey[0], writer)
 		fmt.Fprintf(writer, refKey[0])
 
 	})
 	http.HandleFunc("/refresh", func(writer http.ResponseWriter, request *http.Request) {
-		login, _ := request.Cookie("username")
 		authToken, _ := request.Cookie("ac")
 		refToken, _ := request.Cookie("rc")
 
 		collection:=getConnection()
 
 		authData:=decodeAuthToken(authToken.Value)
-
+		login:=authData["Login"].(string)
 		var user User
-		collection.FindOne(context.TODO(), bson.M{ "login": login.Value, "keys" : bson.M{"$elemMatch" : bson.M {"authkey" : authData["Key"], "refkey" : decodeRefToken(refToken.Value)}}}).Decode(&user)
+		collection.FindOne(context.TODO(), bson.M{ "login": login, "keys" : bson.M{"$elemMatch" : bson.M {"authkey" : authData["Key"], "refkey" : decodeRefToken(refToken.Value)}}}).Decode(&user)
 
-		if user.Login == login.Value{
+		if user.Login == login{
 			authKey:=time.Now().Unix()
-			at, rt := generateKeys(login.Value, authKey)
-			collection.UpdateOne(context.TODO(), bson.M{ "login": login.Value }, bson.M{"$pull": bson.M{"keys": bson.M{"authkey" : authData["Key"], "refkey" : decodeRefToken(refToken.Value)}}})
-			collection.UpdateOne(context.TODO(), bson.M{ "login": login.Value }, bson.M{"$push": bson.M{"keys" : bson.M{"authkey": strconv.FormatInt(authKey,10), "refkey": rt[0]}}})
-			setCookies(login.Value, at, rt[0], writer)
+			at, rt := generateKeys(login, authKey)
+			collection.UpdateOne(context.TODO(), bson.M{ "login": login }, bson.M{"$pull": bson.M{"keys": bson.M{"authkey" : authData["Key"], "refkey" : decodeRefToken(refToken.Value)}}})
+			collection.UpdateOne(context.TODO(), bson.M{ "login": login }, bson.M{"$push": bson.M{"keys" : bson.M{"authkey": strconv.FormatInt(authKey,10), "refkey": rt[0]}}})
+			setCookies(at, rt[0], writer)
 			fmt.Fprintf(writer, "Ключи изменены!" + "\n")
 		}
 	})
