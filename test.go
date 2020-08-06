@@ -167,5 +167,5 @@ func main() {
 		})
 		(*session).EndSession(context.TODO())
 	})
-	http.ListenAndServe(":80", nil)
+	http.ListenAndServe(":" + os.Getenv("PORT"), nil)
 }
